@@ -1,12 +1,14 @@
 import { motion } from "motion/react";
 import { Backdrop, dialogMotion } from "./motion";
-import { useMemo, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { MessageSquarePlus, Send } from "lucide-react";
+import { CaseSensitive, MessageSquarePlus, Send, UserRound } from "lucide-react";
 import { toast } from "sonner";
-import { keys } from "@/hooks/use-relay";
-import { api, ch, type Account, type Conversation } from "@/lib/relay";
+import { keys, useContacts, useSettings } from "@/hooks/use-relay";
+import { api, ch, type Account, type ChannelId, type Conversation } from "@/lib/relay";
 import { Avatar, avatarUrl } from "./common";
+import { RichComposer, type ComposerHandle } from "./RichComposer";
+import { outgoingFor, signatureApplies, withSignature } from "@/lib/formatting";
 
 const input = "mt-1 w-full rounded-lg border bg-card px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-ring";
 const label = "text-[11px] font-semibold uppercase tracking-widest text-muted-foreground";
@@ -14,18 +16,29 @@ const label = "text-[11px] font-semibold uppercase tracking-widest text-muted-fo
 const isEmail = (a: Account) => a.channel === "gmail" || a.channel === "mail";
 
 /** Start a brand-new conversation from any connected account. */
-export function ComposeDialog({ accounts, convos, onOpen, onClose }: {
+export function ComposeDialog({ accounts, convos, onOpen, onClose, initialTo, preferChannels }: {
   accounts: Account[];
   convos: Conversation[];
+  /** Pre-filled recipient (e.g. "Message" from a saved contact). */
+  initialTo?: string;
+  /** Pick the first connected account on one of these channels. */
+  preferChannels?: ChannelId[];
   onOpen: (conversationId: number) => void;
   onClose: () => void;
 }) {
   const qc = useQueryClient();
   const usable = accounts.filter((a) => a.status === "connected");
-  const [accountId, setAccountId] = useState(usable[0]?.id ?? 0);
-  const [to, setTo] = useState("");
+  const preferred = preferChannels?.flatMap((ch) => usable.filter((a) => a.channel === ch))[0];
+  const [accountId, setAccountId] = useState((preferred ?? usable[0])?.id ?? 0);
+  const [to, setTo] = useState(initialTo ?? "");
+  const { data: contacts = [] } = useContacts();
+  const { settings } = useSettings(true);
   const [subject, setSubject] = useState("");
+  // `text` mirrors the editor's plain text (to enable Send); the formatted content is read on send.
   const [text, setText] = useState("");
+  const onTextChange = useCallback((t: string) => setText(t), []);
+  const composer = useRef<ComposerHandle>(null);
+  const [toolbar, setToolbar] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const account = usable.find((a) => a.id === accountId);
@@ -42,9 +55,12 @@ export function ComposeDialog({ accounts, convos, onOpen, onClose }: {
     setBusy(true);
     setError("");
     try {
+      // Converted to what the chosen channel understands (WhatsApp markers, Telegram/email HTML).
+      const content = composer.current?.getHtml() ?? "";
+      const out = outgoingFor(account.channel, signatureApplies(account.channel, text, settings) ? withSignature(content, settings!.signature) : content);
       const { conversationId } = await api<{ conversationId: number }>("/compose", {
         method: "POST",
-        body: { accountId, to: to.trim(), text, ...(isEmail(account) && subject.trim() && { subject: subject.trim() }) },
+        body: { accountId, to: to.trim(), text: out.text, ...(out.html && { html: out.html }), ...(isEmail(account) && subject.trim() && { subject: subject.trim() }) },
       });
       await qc.invalidateQueries({ queryKey: keys.conversations });
       toast.success(`Sent via ${ch(account.channel).name}`);
@@ -57,11 +73,22 @@ export function ComposeDialog({ accounts, convos, onOpen, onClose }: {
     }
   };
 
+  // Saved contacts whose name matches, with the phone or email that suits this account's channel.
+  const contactHits = useMemo(() => {
+    const q = to.trim().toLowerCase();
+    if (!account || q.length < 2) return [];
+    return contacts
+      .filter((p) => p.name.toLowerCase().includes(q))
+      .map((p) => ({ p, value: isEmail(account) ? p.email : p.phone ? `+${p.phone}` : null }))
+      .filter((x): x is { p: typeof x.p; value: string } => !!x.value && x.value !== to)
+      .slice(0, 4);
+  }, [to, contacts, account]);
+
   const placeholder = !account ? "" : isEmail(account) ? "name@example.com" : account.channel === "whatsapp" ? "+91 98765 43210" : "@username or +91 98765 43210";
 
   return (
     <Backdrop onClick={onClose} className="grid place-items-center p-4">
-      <motion.form {...dialogMotion} className="scrollbar-thin max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-2xl border bg-popover p-5 shadow-soft" onClick={(e) => e.stopPropagation()}
+      <motion.form id="compose-form" {...dialogMotion} className="scrollbar-thin max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-2xl border bg-popover p-5 shadow-soft" onClick={(e) => e.stopPropagation()}
         onSubmit={(e) => { e.preventDefault(); if (account && to.trim() && text.trim() && !busy) void submit(); }}>
         <div className="flex items-center gap-3">
           <span className="grid h-9 w-9 place-items-center rounded-lg bg-primary text-primary-foreground"><MessageSquarePlus className="h-4 w-4" /></span>
@@ -98,6 +125,16 @@ export function ComposeDialog({ accounts, convos, onOpen, onClose }: {
             {account?.channel === "telegram" && (
               <p className="-mt-1.5 text-[11px] text-muted-foreground">A phone number only works if that person lets others find them by number; a @username always works.</p>
             )}
+            {contactHits.length > 0 && (
+              <div className="flex flex-wrap gap-1.5">
+                {contactHits.map(({ p, value }) => (
+                  <button type="button" key={p.id} onClick={() => setTo(value)}
+                    className="flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs hover:bg-muted">
+                    <UserRound className="h-3 w-3" /> <b>{p.name}</b> <span className="text-muted-foreground">{value}</span>
+                  </button>
+                ))}
+              </div>
+            )}
             {existing.length > 0 && (
               <div className="rounded-lg border">
                 <p className="px-3 pt-2 text-[11px] text-muted-foreground">Already chatting on this account:</p>
@@ -118,11 +155,20 @@ export function ComposeDialog({ accounts, convos, onOpen, onClose }: {
               </label>
             )}
 
-            <label className="block"><span className={label}>Message</span>
-              <textarea value={text} onChange={(e) => setText(e.target.value)} rows={5}
-                onKeyDown={(e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); e.currentTarget.form?.requestSubmit(); } }}
-                className={`${input} resize-y`} />
-            </label>
+            <div>
+              <div className="flex items-center justify-between">
+                <span className={label}>Message</span>
+                <button type="button" onClick={() => setToolbar((v) => !v)} aria-pressed={toolbar}
+                  title={toolbar ? "Hide formatting" : `Formatting (what ${account ? ch(account.channel).name : "this app"} supports)`}
+                  className={`grid h-6 w-6 place-items-center rounded-md hover:bg-muted ${toolbar ? "text-primary" : "text-muted-foreground"}`}><CaseSensitive className="h-4 w-4" /></button>
+              </div>
+              <div className="mt-1 rounded-lg border bg-card px-3 py-1.5 focus-within:ring-2 focus-within:ring-ring">
+                {account && (
+                  <RichComposer ref={composer} channel={account.channel} placeholder="Write your message…" showToolbar={toolbar} submitOn="ctrl-enter"
+                    className="max-h-64 min-h-[7.5rem]" onChange={onTextChange} onSubmit={() => (document.getElementById("compose-form") as HTMLFormElement | null)?.requestSubmit()} />
+                )}
+              </div>
+            </div>
           </div>
         )}
 

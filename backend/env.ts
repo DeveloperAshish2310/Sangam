@@ -34,5 +34,7 @@ export const env = {
   // Where the browser reaches Sangam; OAuth providers redirect back here.
   publicUrl: process.env.RELAY_PUBLIC_URL ?? "http://localhost:8888",
   dbUrl: process.env.RELAY_DB_URL ?? `file:${path.join(DATA_DIR, "relay.db")}`,
+  // The sub-path Sangam is served under ("/" or e.g. "/unified-ChatBox/"), from RELAY_PUBLIC_URL.
+  basePath: new URL(process.env.RELAY_PUBLIC_URL ?? "http://localhost:8888").pathname.replace(/\/?$/, "/"),
   allowedOrigins: (process.env.RELAY_ALLOWED_ORIGINS ?? "http://localhost:8888,http://127.0.0.1:8888").split(","),
 };

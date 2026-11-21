@@ -4,6 +4,7 @@ import { db, schema } from "./db";
 import type { ChannelId, MessageExtra } from "./db/schema";
 import { emit } from "./events";
 import { writeAttachmentFile } from "./attachment-files";
+import { checkSpam } from "./spam";
 
 export type IncomingConversation = {
   externalId: string;
@@ -110,6 +111,8 @@ export async function upsertMessage(conversationId: number, msg: IncomingMessage
     })
     .where(eq(schema.conversations.id, conversationId));
 
+  // New mail from someone new: the spam filter decides before anyone is notified.
+  if (countsAsUnread) await checkSpam(conversationId, msg.text).catch((error) => console.error("[sangam] spam check failed:", error));
   emit({ type: "message", conversationId, messageId: row.id, direction: msg.silent ? "out" : msg.direction });
   return row.id;
 }

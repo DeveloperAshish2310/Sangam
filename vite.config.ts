@@ -6,13 +6,20 @@
 // You can pass additional config via defineConfig({ vite: { ... }, etc... }) if needed.
 import { defineConfig } from "@lovable.dev/vite-tanstack-config";
 
+// Serve under a sub-path (e.g. SANGAM_BASE=/unified-ChatBox/ npm run build:server); "/" otherwise.
+const base = process.env["SANGAM_BASE"] ?? "/";
+
 export default defineConfig({
+  // The built server must also serve its files under the sub-path.
+  // (Passed through to nitro as-is; the wrapper's types just don't list baseURL.)
+  ...(base !== "/" && { nitro: { baseURL: base } as { preset?: string } }),
   tanstackStart: {
     // Redirect TanStack Start's bundled server entry to src/server.ts (our SSR error wrapper).
     // nitro/vite builds from this
     server: { entry: "server" },
   },
   vite: {
+    base,
     server: {
       // The local Sangam backend (backend/index.ts) serves the API, including the SSE stream.
       proxy: { "/api": { target: "http://127.0.0.1:8787" } },

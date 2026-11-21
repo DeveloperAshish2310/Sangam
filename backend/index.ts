@@ -5,6 +5,7 @@ import { csrf } from "hono/csrf";
 import { secureHeaders } from "hono/secure-headers";
 import { startAll, stopAll } from "./connectors/registry";
 import { initDb } from "./db";
+import { startPush } from "./push";
 import { api } from "./routes";
 import { repairStubTexts } from "./store";
 
@@ -26,6 +27,7 @@ const server = serve({ fetch: app.fetch, port: env.port, hostname: env.host }, (
   console.log(`[sangam] API listening on http://${info.address}:${info.port}`);
 });
 
+startPush();
 await startAll();
 
 const shutdown = async () => {

@@ -1,4 +1,5 @@
-import { Check, Moon, PanelLeftClose, PanelLeftOpen, Search, Sun, Tag, SquarePen, X, SlidersHorizontal, User, MessageSquareText, CalendarDays } from "lucide-react";
+import { ActivityStatus, RefreshButton } from "./Activity";
+import { BellOff, Check, Folder, Star, Moon, PanelLeftClose, PanelLeftOpen, Search, Sun, Tag, SquarePen, X, SlidersHorizontal, User, MessageSquareText, CalendarDays } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion } from "motion/react";
 import { PopCount, spring } from "./motion";
@@ -62,6 +63,14 @@ type Props = {
   tags: { tag: string; count: number }[];
   tagFilter: string | null;
   onTagFilter: (tag: string | null) => void;
+  /** Chats with notifications muted (shown with a crossed-out bell). */
+  muted: number[];
+  /** ✕ on a tag chip in a row. */
+  onRemoveTag: (id: number, tag: string) => void;
+  /** Tags on number keys 1–9 (shown on the tag chips). */
+  quickTags: string[];
+  /** Shown above the list (e.g. the Spam explainer). */
+  notice?: React.ReactNode;
   onFilters: (f: Filters) => void;
   dark: boolean;
   onToggleDark: () => void;
@@ -224,6 +233,7 @@ export function ConversationList(p: Props) {
         <div className="flex items-center justify-between">
           <h1 className="text-2xl font-semibold">{title}</h1>
           <div className="flex gap-1">
+            <RefreshButton />
             <button onClick={p.onCompose} title="New message" className="grid h-9 w-9 place-items-center rounded-lg text-muted-foreground hover:bg-muted">
               <SquarePen className="h-4 w-4" />
             </button>
@@ -241,7 +251,10 @@ export function ConversationList(p: Props) {
         </div>
         <div className="flex items-center justify-between gap-2">
           <p className="text-sm text-muted-foreground">{p.totalUnread} unread across all channels</p>
-          <LiveBadge />
+          <div className="flex items-center gap-1.5">
+            <ActivityStatus />
+            <LiveBadge />
+          </div>
         </div>
         <div className="mt-4 flex items-center gap-2 rounded-xl border bg-card py-1 pl-3 pr-1">
           <Search className="h-4 w-4 text-muted-foreground" />
@@ -306,12 +319,14 @@ export function ConversationList(p: Props) {
             )}
             {p.tags.map(({ tag, count }) => (
               <TagChip key={tag} active={p.tagFilter === tag} onClick={() => p.onTagFilter(tag)}>
-                <Tag className="h-2.5 w-2.5" />{tag}<span className="opacity-60">{count}</span>
+                {p.quickTags.includes(tag) ? <kbd title={`Press ${p.quickTags.indexOf(tag) + 1} to toggle this tag`} className="rounded bg-muted px-1 text-[9px] font-bold">{p.quickTags.indexOf(tag) + 1}</kbd> : <Tag className="h-2.5 w-2.5" />}
+                {tag}<span className="opacity-60">{count}</span>
               </TagChip>
             ))}
           </div>
         )}
       </div>
+      {p.notice}
       <div className="scrollbar-thin flex-1 space-y-1 overflow-y-auto px-3 pb-4">
         {p.loading && Array.from({ length: 7 }, (_, i) => <SkeletonRow key={i} />)}
         <AnimatePresence initial={false}>
@@ -341,7 +356,7 @@ export function ConversationList(p: Props) {
               exit={{ opacity: 0, x: -24, transition: { duration: 0.18 } }}
               transition={spring}
               whileTap={{ scale: 0.985 }}
-              className={`relative isolate flex w-full gap-3 rounded-xl p-3 text-left transition-colors ${p.activeId === c.id ? "" : "hover:bg-muted"} ${p.menuConvoId === c.id ? "ring-2 ring-ring" : ""} ${flashing.has(c.id) ? "animate-flash" : ""} ${isSelected(c.id) ? "bg-primary/10 ring-1 ring-primary/40" : ""} touch-pan-y select-none [-webkit-touch-callout:none]`}>
+              className={`pv relative isolate flex w-full gap-3 rounded-xl p-3 text-left transition-colors ${p.activeId === c.id ? "" : "hover:bg-muted"} ${p.menuConvoId === c.id ? "ring-2 ring-ring" : ""} ${flashing.has(c.id) ? "animate-flash" : ""} ${isSelected(c.id) ? "bg-primary/10 ring-1 ring-primary/40" : ""} touch-pan-y select-none [-webkit-touch-callout:none]`}>
               {p.activeId === c.id && <motion.span layoutId="list-active" transition={spring} className="absolute inset-0 -z-10 rounded-xl bg-card shadow-soft ring-1 ring-border" />}
               <div className="relative shrink-0">
                 <Avatar name={c.name} channel={c.channel} photo={avatarUrl(c)} />
@@ -357,7 +372,11 @@ export function ConversationList(p: Props) {
               <div className="min-w-0 flex-1">
                 <div className="flex items-center justify-between gap-2">
                   <p className={`truncate text-sm ${c.unread ? "font-bold" : "font-medium"}`}>{c.name}</p>
-                  <span className="shrink-0 text-xs text-muted-foreground">{formatTime(c.lastMessage?.sentAt ?? c.lastMessageAt)}</span>
+                  <span className="flex shrink-0 items-center gap-1 text-xs text-muted-foreground">
+                    {p.muted.includes(c.id) && <BellOff className="h-3 w-3" aria-label="Muted" />}
+                    {c.starred && <Star className="h-3 w-3 fill-primary text-primary" aria-label="Starred" />}
+                    {formatTime(c.lastMessage?.sentAt ?? c.lastMessageAt)}
+                  </span>
                 </div>
                 {c.subject && <p className="truncate text-xs font-semibold">{c.subject}</p>}
                 <div className="flex items-center gap-2">
@@ -367,8 +386,19 @@ export function ConversationList(p: Props) {
                 <div className="mt-1 flex items-center gap-1.5">
                   <p className={`shrink-0 text-[10px] font-semibold uppercase tracking-wider ${C.color}`}>{C.name}</p>
                   {via && <p className="min-w-0 truncate text-[10px] font-medium text-muted-foreground" title={`Account: ${via}`}>· {via}</p>}
+                  {c.folder && c.folder !== "spam" && p.view !== `folder:${c.folder}` && (
+                    <span className="flex shrink-0 items-center gap-0.5 text-[9px] font-medium text-muted-foreground" title={`In folder “${c.folder}”`}><Folder className="h-2.5 w-2.5" />{c.folder}</span>
+                  )}
                   {c.tags.map((t) => (
-                    <span key={t} className="flex items-center gap-0.5 rounded-full bg-muted px-1.5 py-0.5 text-[9px] font-medium text-muted-foreground"><Tag className="h-2 w-2" />{t}</span>
+                    <span key={t} className="group/tag flex items-center gap-0.5 rounded-full bg-muted py-0.5 pl-1.5 pr-1 text-[9px] font-medium text-muted-foreground">
+                      <Tag className="h-2 w-2" />{t}
+                      <span role="button" tabIndex={-1} title={`Remove tag “${t}”`}
+                        onPointerDown={(e) => e.stopPropagation()}
+                        onClick={(e) => { e.stopPropagation(); p.onRemoveTag(c.id, t); }}
+                        className="-mr-0.5 grid h-3 w-3 place-items-center rounded-full opacity-0 transition hover:bg-destructive/20 hover:text-destructive group-hover/tag:opacity-100">
+                        <X className="h-2 w-2" />
+                      </span>
+                    </span>
                   ))}
                 </div>
               </div>

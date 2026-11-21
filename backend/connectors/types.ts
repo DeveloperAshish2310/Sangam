@@ -1,6 +1,7 @@
 import type { ChannelId, MessageButton } from "../db/schema";
 import type { schema } from "../db";
 import type { IncomingMessage } from "../store";
+import type { JobOptions } from "../jobs";
 
 export type Account = typeof schema.accounts.$inferSelect;
 export type Conversation = typeof schema.conversations.$inferSelect;
@@ -14,6 +15,10 @@ export interface ConnectorContext {
   saveSyncState(value: unknown): Promise<void>;
   setStatus(status: Account["status"], message?: string): Promise<void>;
   log(...args: unknown[]): void;
+  /** Runs work through this account's job queue (rate limits, retries, priorities). */
+  job<T>(opts: JobOptions, fn: () => Promise<T>): Promise<T>;
+  /** What the Refresh button does for this account (e.g. poll now, re-read recent chats). */
+  onRefresh(fn: () => Promise<void>): void;
 }
 
 /**
@@ -26,9 +31,17 @@ export interface Connector {
   /** Backfill and begin listening (persistent connection or polling). Returns a stop function. */
   start(ctx: ConnectorContext): Promise<() => void | Promise<void>>;
   /** Sends text and/or files. Telegram sends one message per file, hence the optional array. */
-  send(ctx: ConnectorContext, conversation: Conversation, text: string, files: OutgoingFile[]): Promise<IncomingMessage | IncomingMessage[]>;
+  send(ctx: ConnectorContext, conversation: Conversation, text: string, files: OutgoingFile[], opts?: SendOptions): Promise<IncomingMessage | IncomingMessage[]>;
   /** Fetches an attachment's bytes from the provider (cached by the caller afterwards). */
   downloadAttachment?(ctx: ConnectorContext, conversation: Conversation, attachment: { key: string; name: string; ref: Record<string, unknown> }): Promise<Buffer>;
+  /** A small preview image (a video's poster, a photo's thumbnail), or null when there is none. */
+  downloadThumbnail?(ctx: ConnectorContext, conversation: Conversation, attachment: AttachmentRef): Promise<Buffer | null>;
+  /** Bytes start..end (inclusive) of a file, so videos play while streaming instead of downloading whole. */
+  streamAttachment?(ctx: ConnectorContext, conversation: Conversation, attachment: AttachmentRef, start: number, end: number): Promise<Buffer>;
+  /** Fetches messages older than `beforeExternalId` (the oldest one stored) from the service. */
+  loadOlder?(ctx: ConnectorContext, conversation: Conversation, beforeExternalId: string | null, limit: number): Promise<{ added: number; done: boolean }>;
+  /** Members of a group chat, or null when the chat isn't a group. */
+  members?(ctx: ConnectorContext, conversation: Conversation): Promise<GroupMembers | null>;
   markRead?(ctx: ConnectorContext, conversation: Conversation): Promise<void>;
   /** Revoke tokens / log out on the provider side. */
   disconnect?(ctx: ConnectorContext): Promise<void>;
@@ -47,12 +60,27 @@ export interface Connector {
   deleteConversation?(ctx: ConnectorContext, conversation: Conversation, opts: DeleteOptions & { keepChat: boolean }): Promise<void>;
 }
 
+export type GroupMember = {
+  id: string;
+  name: string;
+  /** @username or +phone, when the service shares it. */
+  handle: string | null;
+  role: "owner" | "admin" | "member";
+  you: boolean;
+};
+/** `total` can exceed `members.length` (huge groups are listed partly); `note` explains a hidden list. */
+export type GroupMembers = { total: number; members: GroupMember[]; note?: string };
+
+export type AttachmentRef = { key: string; name: string; ref: Record<string, unknown> };
+
 /** forEveryone: also delete for the other side, where the provider supports it (Telegram). */
 export type DeleteOptions = { forEveryone: boolean };
 
-export type ComposeInput = { to: string; subject?: string | undefined; text: string };
+export type ComposeInput = { to: string; subject?: string | undefined; text: string; html?: string | undefined };
 
 export type OutgoingFile = { name: string; mime: string; data: Buffer };
+/** `html`: the formatted version of the text, in the channel's own HTML flavour (Telegram or email). */
+export type SendOptions = { html?: string | undefined };
 
 export type ButtonResult = { answer?: string | undefined; url?: string | undefined };
 export type BotCommand = { command: string; description: string };

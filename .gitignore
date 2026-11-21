@@ -45,3 +45,8 @@ dump/
 *.db-shm
 PLAN.md
 roadmap.md
+PLAN-*.md
+pointleftout.md
+
+# Backups of replaced files
+*.bak

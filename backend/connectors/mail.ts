@@ -377,6 +377,18 @@ export const mailConnector: Connector = {
         if (!stopped) await new Promise((r) => setTimeout(r, RECONNECT_MS));
       }
     };
+    // Refresh: read new mail, Sent and read state now (the connection loop retries on its own if it's down).
+    ctx.onRefresh(async () => {
+      const c = client;
+      if (!c?.usable) return;
+      await ctx.job({ name: "sync", label: "Syncing Work Mail", priority: "low", dedupe: true }, () =>
+        serial(async () => {
+          await syncInbox(c);
+          await syncSent();
+          await refreshFlags(c);
+        }),
+      );
+    });
     void connectLoop();
 
     return async () => {
@@ -386,7 +398,7 @@ export const mailConnector: Connector = {
     };
   },
 
-  async send(ctx, conversation, text, files) {
+  async send(ctx, conversation, text, files, opts) {
     const creds = ctx.getCredentials<MailCredentials>();
     if (!creds) throw new Error("Work Mail is not signed in");
     const meta = conversation.meta as ConvoMeta | null;
@@ -400,6 +412,7 @@ export const mailConnector: Connector = {
       inReplyTo: meta.lastMessageId,
       references: meta.references,
       text,
+      ...(opts?.html && { html: opts.html }),
       messageId,
       date: new Date(),
       attachments: files.map((f) => ({ filename: f.name, content: f.data, contentType: f.mime })),
@@ -432,16 +445,16 @@ export const mailConnector: Connector = {
     });
   },
 
-  async compose(ctx, { to, subject, text }) {
+  async compose(ctx, { to, subject, text, html }) {
     const creds = ctx.getCredentials<MailCredentials>();
     if (!creds) throw new Error("Work Mail is not signed in");
     const messageId = newMessageId(creds);
     const finalSubject = subject || "(no subject)";
     const sentAt = Date.now();
-    await deliver(ctx, creds, { from: { name: creds.name, address: creds.email }, to, subject: finalSubject, text, messageId, date: new Date(sentAt) });
+    await deliver(ctx, creds, { from: { name: creds.name, address: creds.email }, to, subject: finalSubject, text, ...(html && { html }), messageId, date: new Date(sentAt) });
     // Keyed by our Message-ID, so the recipient's reply (In-Reply-To it) joins this conversation.
     const conversationId = await upsertConversation(ctx.account.id, { externalId: messageId, name: to, subject: finalSubject });
-    await upsertMessage(conversationId, { externalId: messageId, direction: "out", text, sentAt, silent: true });
+    await upsertMessage(conversationId, { externalId: messageId, direction: "out", text, html: html ?? null, sentAt, silent: true });
     const meta: ConvoMeta = { replyTo: to, lastMessageId: messageId, references: [messageId], subject: finalSubject, sentAt };
     await db.update(schema.conversations).set({ meta }).where(eq(schema.conversations.id, conversationId));
     return { conversationId };

@@ -108,7 +108,7 @@ const encodeHeader = (value: string) =>
   /^[\x20-\x7e]*$/.test(value) ? value : `=?UTF-8?B?${Buffer.from(value, "utf8").toString("base64")}?=`;
 
 /** Builds a raw RFC 2822 reply (see buildEmail). */
-export function buildReply(opts: { from: string; to: string; subject: string; inReplyTo: string; references: string; text: string; attachments?: EmailAttachment[] }) {
+export function buildReply(opts: { from: string; to: string; subject: string; inReplyTo: string; references: string; text: string; html?: string; attachments?: EmailAttachment[] }) {
   return buildEmail({ ...opts, subject: /^re:/i.test(opts.subject) ? opts.subject : `Re: ${opts.subject}` });
 }
 
@@ -120,8 +120,12 @@ const base64Lines = (data: Buffer) => data.toString("base64").replace(/.{76}/g, 
 const headerFilename = (name: string) => encodeHeader(noNewlines(name).replace(/["\\]/g, "_")) || "file";
 const safeMime = (mime: string) => (/^[\w.+-]+\/[\w.+-]+$/.test(mime) ? mime : "application/octet-stream");
 
+/** A sent formatted email: the editor's HTML in a minimal document with readable defaults. */
+const emailDocument = (html: string) =>
+  `<!doctype html><html><head><meta charset="utf-8"></head><body style="font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.5">${html}</body></html>`;
+
 /** Builds a raw RFC 2822 email (new or reply), with optional file attachments. */
-export function buildEmail(opts: { from: string; to: string; subject: string; inReplyTo?: string; references?: string; text: string; attachments?: EmailAttachment[] }) {
+export function buildEmail(opts: { from: string; to: string; subject: string; inReplyTo?: string; references?: string; text: string; html?: string; attachments?: EmailAttachment[] }) {
   const head = [
     `From: ${noNewlines(opts.from)}`,
     `To: ${noNewlines(opts.to)}`,
@@ -130,7 +134,21 @@ export function buildEmail(opts: { from: string; to: string; subject: string; in
     (opts.references || opts.inReplyTo) && `References: ${noNewlines([opts.references, opts.inReplyTo].filter(Boolean).join(" "))}`,
     "MIME-Version: 1.0",
   ].filter(Boolean) as string[];
-  const textPart = ["Content-Type: text/plain; charset=UTF-8", "Content-Transfer-Encoding: base64", "", base64Lines(Buffer.from(opts.text, "utf8"))].join(CRLF);
+  const plainPart = ["Content-Type: text/plain; charset=UTF-8", "Content-Transfer-Encoding: base64", "", base64Lines(Buffer.from(opts.text, "utf8"))].join(CRLF);
+  // Formatted emails carry both versions (multipart/alternative); mail apps show the best they can.
+  const altBoundary = `sangam-alt-${randomUUID()}`;
+  const textPart = !opts.html
+    ? plainPart
+    : [
+        `Content-Type: multipart/alternative; boundary="${altBoundary}"`,
+        "",
+        `--${altBoundary}`,
+        plainPart,
+        `--${altBoundary}`,
+        ["Content-Type: text/html; charset=UTF-8", "Content-Transfer-Encoding: base64", "", base64Lines(Buffer.from(emailDocument(opts.html), "utf8"))].join(CRLF),
+        `--${altBoundary}--`,
+        "",
+      ].join(CRLF);
   if (!opts.attachments?.length) return Buffer.from([...head, textPart].join(CRLF), "utf8");
 
   // multipart/mixed: the text first (Gmail numbers it part "0"), then each file ("1", "2", …).

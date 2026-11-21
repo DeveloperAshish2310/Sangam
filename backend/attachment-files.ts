@@ -12,3 +12,8 @@ const fileFor = (id: number) => path.join(DIR, String(Math.trunc(id)));
 
 export const writeAttachmentFile = (id: number, data: Buffer) => writeFile(fileFor(id), data);
 export const readAttachmentFile = (id: number) => readFile(fileFor(id)).catch(() => null);
+
+// Preview images (video posters, photo thumbnails). An empty file means "this one has none".
+const thumbFor = (id: number) => `${fileFor(id)}.thumb`;
+export const writeThumbFile = (id: number, data: Buffer) => writeFile(thumbFor(id), data);
+export const readThumbFile = (id: number) => readFile(thumbFor(id)).catch(() => null);

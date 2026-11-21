@@ -11,6 +11,8 @@ import {
 import { useEffect, type ReactNode } from "react";
 
 import appCss from "../styles.css?url";
+import { startPwa } from "../lib/pwa";
+import { BASE, withBase } from "../lib/base";
 import { reportLovableError } from "../lib/lovable-error-reporting";
 
 function NotFoundComponent() {
@@ -62,7 +64,7 @@ function ErrorComponent({ error, reset }: ErrorComponentProps) {
             Try again
           </button>
           <a
-            href="/"
+            href={BASE}
             className="inline-flex items-center justify-center rounded-md border border-input bg-background px-4 py-2 text-sm font-medium text-foreground transition-colors hover:bg-accent"
           >
             Go home
@@ -78,6 +80,14 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
     meta: [
       { charSet: "utf-8" },
       { name: "viewport", content: "width=device-width, initial-scale=1" },
+      // Installable app (PWA): window colour, and full-screen "Add to Home Screen" on iPhone/iPad.
+      { name: "theme-color", content: "#f8f6f1", media: "(prefers-color-scheme: light)" },
+      { name: "theme-color", content: "#141a24", media: "(prefers-color-scheme: dark)" },
+      { name: "application-name", content: "Sangam" },
+      { name: "apple-mobile-web-app-capable", content: "yes" },
+      { name: "mobile-web-app-capable", content: "yes" },
+      { name: "apple-mobile-web-app-title", content: "Sangam" },
+      { name: "apple-mobile-web-app-status-bar-style", content: "black-translucent" },
       { title: "Sangam — Unified Inbox" },
       { name: "description", content: "All your messages in one place." },
       { name: "author", content: "Lovable" },
@@ -92,7 +102,10 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
         rel: "stylesheet",
         href: appCss,
       },
-      { rel: "icon", href: "/favicon.ico", type: "image/x-icon" },
+      { rel: "icon", href: withBase("icon.svg"), type: "image/svg+xml" },
+      { rel: "icon", href: withBase("favicon.ico"), sizes: "48x48" },
+      { rel: "apple-touch-icon", href: withBase("icons/apple-touch-icon.png") },
+      { rel: "manifest", href: withBase("manifest.webmanifest") },
       { rel: "preconnect", href: "https://fonts.googleapis.com" },
       { rel: "stylesheet", href: "https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700&family=Sora:wght@500;600;700&display=swap" },
     ],
@@ -119,6 +132,7 @@ function RootShell({ children }: { children: ReactNode }) {
 
 function RootComponent() {
   const { queryClient } = Route.useRouteContext();
+  useEffect(() => startPwa(), []);
 
   return (
     <QueryClientProvider client={queryClient}>

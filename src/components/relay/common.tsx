@@ -1,3 +1,4 @@
+import { withBase } from "@/lib/base";
 import { useEffect, useState, type ReactNode } from "react";
 import { motion } from "motion/react";
 import { X, type LucideIcon } from "lucide-react";
@@ -9,9 +10,11 @@ export const ActivePill = () => (
   <motion.span layoutId="sidebar-active" className="absolute inset-0 -z-0 rounded-lg bg-sidebar-accent" transition={spring} />
 );
 
-export function NavItem({ icon: I, label, count, active, collapsed, onClick }: { icon: LucideIcon; label: string; count?: number; active: boolean; collapsed: boolean; onClick: () => void }) {
+export function NavItem({ icon: I, label, count, active, collapsed, onClick, onContextMenu }: {
+  icon: LucideIcon; label: string; count?: number; active: boolean; collapsed: boolean; onClick: () => void; onContextMenu?: (x: number, y: number) => void;
+}) {
   return (
-    <button onClick={onClick} title={label} className={`relative isolate flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm transition-colors ${collapsed ? "justify-center px-0" : ""} ${active ? "text-sidebar-accent-foreground" : "hover:bg-sidebar-accent/60"}`}>
+    <button onClick={onClick} title={label} onContextMenu={onContextMenu && ((e) => { e.preventDefault(); onContextMenu(e.clientX, e.clientY); })} className={`relative isolate flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm transition-colors ${collapsed ? "justify-center px-0" : ""} ${active ? "text-sidebar-accent-foreground" : "hover:bg-sidebar-accent/60"}`}>
       {active && <ActivePill />}
       <I className="relative h-4 w-4 shrink-0" />{!collapsed && <span className="relative flex-1 text-left">{label}</span>}
       {!collapsed && !!count && <PopCount value={count} className="relative rounded-full bg-sidebar-primary px-2 text-[10px] font-bold text-sidebar-primary-foreground" />}
@@ -20,7 +23,7 @@ export function NavItem({ icon: I, label, count, active, collapsed, onClick }: {
 }
 
 /** Profile photo URL for a conversation, or undefined to show initials. */
-export const avatarUrl = (c: { id: number; avatar: string | null }) => (c.avatar ? `/api/avatars/${c.id}?v=${c.avatar}` : undefined);
+export const avatarUrl = (c: { id: number; avatar: string | null }) => (c.avatar ? withBase(`/api/avatars/${c.id}?v=${c.avatar}`) : undefined);
 
 export function Avatar({ name, channel, big, photo }: { name: string; channel: ChannelId; big?: boolean; photo?: string | undefined }) {
   const C = ch(channel);

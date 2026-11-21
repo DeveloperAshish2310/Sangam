@@ -158,6 +158,8 @@ function parseMessage(msg: WAMessage) {
 // ---------- Live sockets ----------
 
 const sockets = new Map<number, WASocket>();
+// Per account: what Sangam knows about a person (saved name, phone) — filled in by start().
+const people = new Map<number, (jid: string, phone?: string | null) => { name: string | null; phone: string | null }>();
 const reconnectors = new Map<number, () => Promise<void>>();
 
 async function socketFor(ctx: ConnectorContext) {
@@ -251,6 +253,12 @@ export const whatsappConnector: Connector = {
       }
     };
     const nameOf = (jid: string, fallback?: string | null) => names.get(jid) || fallback || (isJidGroup(jid) ? "Group" : phoneOf(jid));
+    // Group info → members: names and phones learned during sync, LIDs resolved where known.
+    people.set(ctx.account.id, (jid, phone) => {
+      const pn = phone ? jidNormalizedUser(phone) : chatJid(jid);
+      const name = names.get(pn) || names.get(jidNormalizedUser(jid)) || null;
+      return { name, phone: pn.endsWith("@s.whatsapp.net") ? phoneOf(pn) : null };
+    });
 
     // Profile photos are fetched one at a time with a pause, so the account never looks like a bot.
     const photoQueue: { jid: string; convoId: number }[] = [];
@@ -455,9 +463,14 @@ export const whatsappConnector: Connector = {
     reconnectors.set(ctx.account.id, async () => {
       if (!stopped && !sock?.user) await connect();
     });
+    // WhatsApp pushes everything over its live connection, so refreshing means reconnecting if it dropped.
+    ctx.onRefresh(async () => {
+      if (!stopped && !sock?.user) await connect();
+    });
     await connect();
 
     return async () => {
+      people.delete(ctx.account.id);
       stopped = true;
       clearTimeout(timer);
       reconnectors.delete(ctx.account.id);
@@ -499,6 +512,26 @@ export const whatsappConnector: Connector = {
   },
 
   // Explicit reads only (opening the chat in Sangam) — WhatsApp then shows blue ticks to the sender.
+  async members(ctx, conversation) {
+    if (!isJidGroup(conversation.externalId)) return null;
+    const sock = await socketFor(ctx);
+    const meta = await sock.groupMetadata(conversation.externalId);
+    const whoIs = people.get(ctx.account.id);
+    const mine = new Set([sock.user?.id, sock.user?.lid].filter(Boolean).map((j) => jidNormalizedUser(j!)));
+    const members = meta.participants.map((p) => {
+      const known = whoIs?.(p.id, p.phoneNumber) ?? { name: null, phone: null };
+      const you = mine.has(jidNormalizedUser(p.id)) || (!!p.phoneNumber && mine.has(jidNormalizedUser(p.phoneNumber)));
+      return {
+        id: p.id,
+        name: you ? "You" : known.name || p.name || p.notify || known.phone || "WhatsApp member",
+        handle: known.phone,
+        role: (p.admin === "superadmin" ? "owner" : p.admin === "admin" ? "admin" : "member") as "owner" | "admin" | "member",
+        you,
+      };
+    });
+    return { total: members.length, members };
+  },
+
   async markRead(ctx, conversation) {
     const sock = await socketFor(ctx);
     const unread = await db

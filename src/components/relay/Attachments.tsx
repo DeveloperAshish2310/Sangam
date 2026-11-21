@@ -1,19 +1,30 @@
 import { useEffect, useMemo, useState } from "react";
 import { AnimatePresence, motion } from "motion/react";
-import { Download, File as FileIcon, FileText, Image as ImageIcon, Music, Video, X } from "lucide-react";
+import { Download, File as FileIcon, FileText, Image as ImageIcon, Music, Play, Video, X } from "lucide-react";
 import type { Attachment } from "@/lib/relay";
+import { withBase } from "@/lib/base";
 import { dialogMotion, fade } from "./motion";
 
 // Kept in step with the backend's INLINE_SAFE list: only these are shown inside the page.
 const IMAGE = /^image\/(png|jpeg|gif|webp|avif|bmp)$/;
 const VIDEO = /^video\/(mp4|webm|ogg|quicktime)$/;
 const AUDIO = /^audio\//;
-// Bigger videos would start downloading just to show a player; they get a file card instead.
+// Services that can't stream serve whole files; bigger videos than this get a file card instead.
 const MAX_INLINE_VIDEO = 50 * 1024 * 1024;
 // Matches the backend: larger files can't be opened through Sangam at all.
 const MAX_OPENABLE = 200 * 1024 * 1024;
 
-export const attachmentUrl = (a: Pick<Attachment, "id">, download = false) => `/api/attachments/${a.id}${download ? "?download=1" : ""}`;
+export const attachmentUrl = (a: Pick<Attachment, "id">, download = false) => withBase(`/api/attachments/${a.id}${download ? "?download=1" : ""}`);
+/** The small preview (photo thumbnail / video poster): kilobytes instead of the whole file. */
+export const thumbUrl = (a: Pick<Attachment, "id">) => withBase(`/api/attachments/${a.id}/thumb`);
+
+export function formatDuration(seconds: number | null | undefined) {
+  if (!seconds) return "";
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const s = String(seconds % 60).padStart(2, "0");
+  return h ? `${h}:${String(m).padStart(2, "0")}:${s}` : `${m}:${s}`;
+}
 
 export function formatSize(bytes: number | null | undefined) {
   if (!bytes) return "";
@@ -52,14 +63,52 @@ function FileCard({ a, out }: { a: Attachment; out: boolean }) {
   );
 }
 
-/** An image preview; falls back to a file card if it can't be loaded (e.g. removed on the service). */
+/**
+ * An image preview: the small thumbnail when the service has one (the full photo opens on click),
+ * else the photo itself; a file card if neither loads (e.g. removed on the service).
+ */
 function ImageThumb({ a, out, onOpen }: { a: Attachment; out: boolean; onOpen: () => void }) {
-  const [failed, setFailed] = useState(false);
-  if (failed) return <FileCard a={a} out={out} />;
+  const [src, setSrc] = useState<"thumb" | "full" | "failed">(a.thumb ? "thumb" : "full");
+  if (src === "failed") return <FileCard a={a} out={out} />;
   return (
     <motion.button whileHover={{ scale: 1.015 }} whileTap={{ scale: 0.98 }} onClick={onOpen} title={a.name} className="block overflow-hidden rounded-xl bg-muted">
-      <img src={attachmentUrl(a)} alt={a.name} loading="lazy" onError={() => setFailed(true)} className="max-h-72 w-full object-cover" />
+      <img src={src === "thumb" ? thumbUrl(a) : attachmentUrl(a)} alt={a.name} loading="lazy"
+        onError={() => setSrc(src === "thumb" ? "full" : "failed")} className="max-h-72 min-h-24 w-full object-cover" />
     </motion.button>
+  );
+}
+
+/**
+ * A video as its poster with a play button, duration and size. Nothing is fetched until you press
+ * play; then it streams, so it starts quickly and you can skip around.
+ */
+function VideoCard({ a }: { a: Attachment }) {
+  const [playing, setPlaying] = useState(false);
+  const [poster, setPoster] = useState(!!a.thumb);
+  if (playing) {
+    return (
+      <video controls autoPlay playsInline preload="auto" src={attachmentUrl(a)} poster={poster ? thumbUrl(a) : undefined}
+        className="max-h-[28rem] w-full rounded-xl bg-black" />
+    );
+  }
+  const info = [formatDuration(a.duration), formatSize(a.size)].filter(Boolean).join(" · ");
+  return (
+    <button onClick={() => setPlaying(true)} title={`Play ${a.name}`}
+      className="group relative block aspect-video w-80 max-w-full overflow-hidden rounded-xl bg-gradient-to-br from-zinc-700 to-zinc-950">
+      {poster && (
+        <>
+          {/* Blurred fill behind, so portrait videos don't sit in black bars. */}
+          <img src={thumbUrl(a)} alt="" aria-hidden className="absolute inset-0 h-full w-full scale-110 object-cover opacity-60 blur-xl" />
+          <img src={thumbUrl(a)} alt="" loading="lazy" onError={() => setPoster(false)} className="absolute inset-0 h-full w-full object-contain" />
+        </>
+      )}
+      <span className="absolute inset-0 grid place-items-center bg-black/10 transition-colors group-hover:bg-black/25">
+        <span className="grid h-14 w-14 place-items-center rounded-full bg-black/55 text-white shadow-lg backdrop-blur-sm transition-transform group-hover:scale-110">
+          <Play className="ml-1 h-6 w-6 fill-current" />
+        </span>
+      </span>
+      {info && <span className="absolute bottom-2 left-2 rounded-md bg-black/65 px-1.5 py-0.5 text-[11px] font-medium text-white">{info}</span>}
+    </button>
   );
 }
 
@@ -76,8 +125,8 @@ export function AttachmentList({ attachments, out, onOpenImage }: { attachments:
         </div>
       )}
       {rest.map((a) =>
-        VIDEO.test(a.mime) && (a.size ?? 0) <= MAX_INLINE_VIDEO ? (
-          <video key={a.id} controls preload="metadata" src={attachmentUrl(a)} className="max-h-80 w-full rounded-xl bg-black" />
+        VIDEO.test(a.mime) && (a.stream || (a.size ?? 0) <= MAX_INLINE_VIDEO) ? (
+          <VideoCard key={a.id} a={a} />
         ) : AUDIO.test(a.mime) ? (
           <audio key={a.id} controls preload="none" src={attachmentUrl(a)} className="w-64 max-w-full" />
         ) : (

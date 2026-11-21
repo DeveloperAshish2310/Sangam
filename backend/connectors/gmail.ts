@@ -7,6 +7,7 @@ import { env, reloadEnv } from "../env";
 import { upsertConversation, upsertMessage } from "../store";
 import { buildEmail, buildReply, findPartById, gmailAttachments, header, messageBody, parseAddress } from "./mime";
 import type { Connector, ConnectorContext, OutgoingFile } from "./types";
+import { rateLimitDelay } from "../jobs";
 import { Readable } from "node:stream";
 
 // gmail.modify covers reading, marking read and sending — and nothing else (no permanent delete).
@@ -14,9 +15,12 @@ export const GMAIL_SCOPES = ["https://www.googleapis.com/auth/gmail.modify"];
 
 export type GmailCredentials = { tokens: Credentials; email: string };
 // attachmentsSynced: emails synced before attachment support get one re-scan to pick them up.
-type GmailSync = { historyId: string; attachmentsSynced?: boolean };
+// pending: threads found in history but not synced yet, so a failed poll resumes instead of starting over.
+type GmailSync = { historyId: string; attachmentsSynced?: boolean; addressesSynced?: boolean; pending?: string[] };
 
 const POLL_MS = 30_000;
+// More changed threads than this (e.g. after days offline) is cheaper as a fresh backfill.
+const MAX_POLL_THREADS = 60;
 const BACKFILL_THREADS = 50;
 // Mirrors Gmail's main tabs: Promotions, Social and Forums stay out of the unified inbox.
 const SKIPPED_LABELS = new Set(["CATEGORY_PROMOTIONS", "CATEGORY_SOCIAL", "CATEGORY_FORUMS", "SPAM", "TRASH"]);
@@ -73,6 +77,9 @@ async function syncThread(ctx: ConnectorContext, api: gmail_v1.Gmail, threadId: 
   const lastIncoming = [...msgs].reverse().find((m) => !isSent(m));
   const name = lastIncoming ? parseAddress(header(lastIncoming, "From")).name : parseAddress(header(first, "To")).name;
   const convoId = await upsertConversation(ctx.account.id, { externalId: threadId, name, subject: header(first, "Subject") || "(no subject)" });
+  // The other person's address, so the chat can be matched to a saved contact.
+  const address = parseAddress(lastIncoming ? header(lastIncoming, "From") : header(first, "To")).email;
+  await db.update(schema.conversations).set({ meta: { address } }).where(eq(schema.conversations.id, convoId));
 
   const now = Date.now();
   for (const m of msgs) {
@@ -105,36 +112,53 @@ async function backfill(ctx: ConnectorContext, api: gmail_v1.Gmail) {
   const { data } = await api.users.threads.list({ userId: "me", labelIds: ["INBOX"], q: BACKFILL_QUERY, maxResults: BACKFILL_THREADS });
   // Two at a time keeps a full re-scan under Gmail's per-user rate limit.
   await mapLimit(data.threads ?? [], 2, (t) => syncThread(ctx, api, t.id!, { silent: true }));
-  await ctx.saveSyncState({ historyId: profile.historyId!, attachmentsSynced: true } satisfies GmailSync);
+  await ctx.saveSyncState({ historyId: profile.historyId!, attachmentsSynced: true, addressesSynced: true } satisfies GmailSync);
 }
 
 async function poll(ctx: ConnectorContext, api: gmail_v1.Gmail, state: GmailSync) {
-  const threadIds = new Set<string>();
+  const threadIds = new Set(state.pending ?? []);
   let historyId = state.historyId;
-  let pageToken: string | undefined;
-  try {
-    do {
-      const { data } = await api.users.history.list({
-        userId: "me",
-        startHistoryId: state.historyId,
-        historyTypes: ["messageAdded", "labelAdded", "labelRemoved"],
-        ...(pageToken && { pageToken }),
-      });
-      for (const h of data.history ?? []) {
-        for (const item of [...(h.messagesAdded ?? []), ...(h.labelsAdded ?? []), ...(h.labelsRemoved ?? [])]) {
-          if (item.message?.threadId) threadIds.add(item.message.threadId);
+  if (!state.pending?.length) {
+    const known = new Set(
+      (await db.select({ id: schema.conversations.externalId }).from(schema.conversations).where(eq(schema.conversations.accountId, ctx.account.id))).map((c) => c.id),
+    );
+    // New mail only matters when it lands in the inbox; label changes only for threads we already show.
+    const wanted = (m: gmail_v1.Schema$Message | undefined, added: boolean) =>
+      !!m?.threadId && (known.has(m.threadId) || (added && !!m.labelIds?.includes("INBOX") && !m.labelIds.some((l) => SKIPPED_LABELS.has(l))));
+    let pageToken: string | undefined;
+    try {
+      do {
+        const { data } = await api.users.history.list({
+          userId: "me",
+          startHistoryId: state.historyId,
+          historyTypes: ["messageAdded", "labelAdded", "labelRemoved"],
+          maxResults: 500,
+          ...(pageToken && { pageToken }),
+        });
+        for (const h of data.history ?? []) {
+          for (const item of h.messagesAdded ?? []) if (wanted(item.message, true)) threadIds.add(item.message!.threadId!);
+          for (const item of [...(h.labelsAdded ?? []), ...(h.labelsRemoved ?? [])]) if (wanted(item.message, false)) threadIds.add(item.message!.threadId!);
         }
-      }
-      historyId = data.historyId ?? historyId;
-      pageToken = data.nextPageToken ?? undefined;
-    } while (pageToken);
-  } catch (error) {
-    // A checkpoint older than about a week expires; start over from a fresh backfill.
-    if ((error as { code?: number }).code === 404) return backfill(ctx, api);
-    throw error;
+        historyId = data.historyId ?? historyId;
+        pageToken = data.nextPageToken ?? undefined;
+      } while (pageToken);
+    } catch (error) {
+      // A checkpoint older than about a week expires; start over from a fresh backfill.
+      if ((error as { code?: number }).code === 404) return backfill(ctx, api);
+      throw error;
+    }
+    if (threadIds.size > MAX_POLL_THREADS) return backfill(ctx, api);
+    // Move the checkpoint now; the threads still to fetch are kept, so a failure doesn't re-read history.
+    if (historyId !== state.historyId || threadIds.size) await ctx.saveSyncState({ ...state, historyId, pending: [...threadIds] } satisfies GmailSync);
   }
-  for (const id of threadIds) await syncThread(ctx, api, id, { silent: false });
-  if (historyId !== state.historyId) await ctx.saveSyncState({ historyId } satisfies GmailSync);
+  const pending = [...threadIds];
+  while (pending.length) {
+    await syncThread(ctx, api, pending[0]!, { silent: false }).catch((error) => {
+      if ((error as { code?: number }).code !== 404) throw error; // deleted since: nothing to sync
+    });
+    pending.shift();
+    await ctx.saveSyncState({ ...state, historyId, pending } satisfies GmailSync);
+  }
 }
 
 /**
@@ -161,28 +185,54 @@ export const gmailConnector: Connector = {
     const { api } = clientFor(ctx);
     let stopped = false;
     let timer: NodeJS.Timeout | undefined;
+    // Failures wait longer each time (up to 15 min) instead of hammering Gmail every 30 s.
+    let failures = 0;
 
-    const run = async () => {
-      try {
-        const state = ctx.getSyncState<GmailSync>();
-        if (!state) {
-          await ctx.setStatus("connected", "Syncing your inbox…");
-          await backfill(ctx, api);
-          await ctx.setStatus("connected");
-        } else if (!state.attachmentsSynced) {
-          await backfill(ctx, api);
-        } else {
-          await poll(ctx, api, state);
-        }
-      } catch (error) {
-        if (isAuthError(error)) {
-          await ctx.setStatus("error", "Google sign-in expired — reconnect Gmail");
-          return;
-        }
-        ctx.log("sync failed, retrying", error);
+    let inFlight: Promise<void> | null = null;
+
+    const sync = async () => {
+      const state = ctx.getSyncState<GmailSync>();
+      if (!state) {
+        await ctx.setStatus("connected", "Syncing your inbox…");
+        await backfill(ctx, api);
+        await ctx.setStatus("connected");
+      } else if (!state.attachmentsSynced || !state.addressesSynced) {
+        await backfill(ctx, api);
+      } else {
+        await poll(ctx, api, state);
       }
-      if (!stopped) timer = setTimeout(() => void run(), POLL_MS);
     };
+
+    // One sync at a time: the timer and the Refresh button share a running one.
+    const run = () =>
+      (inFlight ??= (async () => {
+        clearTimeout(timer);
+        let delay = POLL_MS;
+        try {
+          // Background work: queued behind anything you're waiting for; rate limits pause and retry it.
+          await ctx.job({ name: "sync", label: "Syncing Gmail", priority: "low", dedupe: true, retries: 2 }, sync);
+          if (failures) await ctx.setStatus("connected");
+          failures = 0;
+        } catch (error) {
+          if (isAuthError(error)) {
+            await ctx.setStatus("error", "Google sign-in expired — reconnect Gmail");
+            stopped = true;
+            return;
+          }
+          failures++;
+          delay = Math.min(POLL_MS * 2 ** failures, 15 * 60_000);
+          if (rateLimitDelay(error) !== null) {
+            // Gmail's quota is per minute, so at least a minute's pause lets it refill.
+            delay = Math.max(delay, 60_000);
+            await ctx.setStatus("connected", `Gmail is rate-limiting; syncing again in ${Math.round(delay / 60_000)} min`);
+            ctx.log(`rate limited by Gmail, retrying in ${delay / 1000}s`);
+          } else ctx.log("sync failed, retrying", error);
+        } finally {
+          inFlight = null;
+          if (!stopped) timer = setTimeout(() => void run(), delay);
+        }
+      })());
+    ctx.onRefresh(run);
     void run();
 
     return () => {
@@ -191,7 +241,7 @@ export const gmailConnector: Connector = {
     };
   },
 
-  async send(ctx, conversation, text, files) {
+  async send(ctx, conversation, text, files, opts) {
     const { api, creds } = clientFor(ctx);
     const { data: thread } = await api.users.threads.get({
       userId: "me",
@@ -212,6 +262,7 @@ export const gmailConnector: Connector = {
       inReplyTo: header(last, "Message-ID"),
       references: header(last, "References"),
       text,
+      html: opts?.html,
       attachments: files,
     });
     const data = await sendRaw(api, raw, conversation.externalId);
@@ -230,13 +281,13 @@ export const gmailConnector: Connector = {
     return Buffer.from(data.data!, "base64url");
   },
 
-  async compose(ctx, { to, subject, text }) {
+  async compose(ctx, { to, subject, text, html }) {
     const { api, creds } = clientFor(ctx);
-    const raw = buildEmail({ from: creds.email, to, subject: subject || "(no subject)", text });
+    const raw = buildEmail({ from: creds.email, to, subject: subject || "(no subject)", text, html });
     const data = await sendRaw(api, raw);
     // A conversation is a Gmail thread; the recipient's reply lands in this same thread.
     const conversationId = await upsertConversation(ctx.account.id, { externalId: data.threadId!, name: parseAddress(to).name, subject: subject || "(no subject)" });
-    await upsertMessage(conversationId, { externalId: data.id!, direction: "out", text, sentAt: Date.now(), silent: true });
+    await upsertMessage(conversationId, { externalId: data.id!, direction: "out", text, html: html ?? null, sentAt: Date.now(), silent: true });
     return { conversationId };
   },
 

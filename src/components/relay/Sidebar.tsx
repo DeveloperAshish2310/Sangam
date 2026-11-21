@@ -1,9 +1,14 @@
-import { Archive, Inbox, MoreHorizontal, Plus, Settings, Sparkles, Star } from "lucide-react";
+import { Archive, Inbox, Lock, MoreHorizontal, Plus, Settings, Sparkles, Star, BookUser, Folder, FolderPlus, ShieldAlert } from "lucide-react";
 import { CHANNELS, type Account, type ChannelId, type User } from "@/lib/relay";
 import { ActivePill, initials, NavItem } from "./common";
 import { PopCount } from "./motion";
 
-export type View = ChannelId | "all" | "starred" | "archived" | `account:${number}`;
+export type View = ChannelId | "all" | "starred" | "archived" | "spam" | `account:${number}` | `folder:${string}`;
+
+/** The folder name when the view is one of your folders, else null. */
+export const viewFolder = (v: View) => (v.startsWith("folder:") ? v.slice(7) : null);
+/** Views that show chats from every channel (so channel chips still apply). */
+export const isGlobalView = (v: View) => v === "all" || v === "starred" || v === "archived" || v === "spam" || v.startsWith("folder:");
 
 /** The account id when the view is a single account, else null. */
 export const viewAccount = (v: View) => (v.startsWith("account:") ? Number(v.slice(8)) : null);
@@ -20,11 +25,19 @@ type Props = {
   multiAccounts: Partial<Record<ChannelId, Account[]>>;
   accountUnread: (accountId: number) => number;
   archivedCount: number;
+  spamCount: number;
+  folders: string[];
+  folderUnread: (folder: string) => number;
+  onNewFolder: () => void;
+  onFolderMenu: (folder: string, x: number, y: number) => void;
+  /** Shown when App lock is on. */
+  onLock?: (() => void) | undefined;
   onProfile: () => void;
   onSettings: () => void;
+  onContacts: () => void;
 };
 
-export function Sidebar({ user, view, onView, collapsed, channels, connectedCount, unread, multiAccounts, accountUnread, archivedCount, onProfile, onSettings }: Props) {
+export function Sidebar({ user, view, onView, collapsed, channels, connectedCount, unread, multiAccounts, accountUnread, archivedCount, spamCount, folders, folderUnread, onNewFolder, onFolderMenu, onLock, onProfile, onSettings, onContacts }: Props) {
   return (
     <aside className={`flex shrink-0 flex-col bg-sidebar text-sidebar-foreground transition-all duration-300 ${collapsed ? "w-[72px]" : "w-64"}`}>
       <div className={`flex items-center gap-2 px-5 py-6 ${collapsed ? "justify-center px-0" : ""}`}>
@@ -35,6 +48,25 @@ export function Sidebar({ user, view, onView, collapsed, channels, connectedCoun
         <NavItem icon={Inbox} label="All inbox" count={unread()} active={view === "all"} collapsed={collapsed} onClick={() => onView("all")} />
         <NavItem icon={Star} label="Starred" active={view === "starred"} collapsed={collapsed} onClick={() => onView("starred")} />
         <NavItem icon={Archive} label="Archived" count={archivedCount} active={view === "archived"} collapsed={collapsed} onClick={() => onView("archived")} />
+        <NavItem icon={ShieldAlert} label="Spam" count={spamCount} active={view === "spam"} collapsed={collapsed} onClick={() => onView("spam")} />
+        <NavItem icon={BookUser} label="Contacts" active={false} collapsed={collapsed} onClick={onContacts} />
+      </nav>
+      {!collapsed && (
+        <div className="mt-6 flex items-center justify-between px-6">
+          <p className="text-[11px] font-semibold uppercase tracking-widest text-sidebar-foreground/50">Folders</p>
+          <button onClick={onNewFolder} title="New folder" className="grid h-5 w-5 place-items-center rounded text-sidebar-foreground/50 hover:bg-sidebar-accent/60 hover:text-sidebar-foreground">
+            <FolderPlus className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      )}
+      <nav className="mt-2 space-y-1 px-3">
+        {folders.map((f) => (
+          <NavItem key={f} icon={Folder} label={f} count={folderUnread(f)} active={view === `folder:${f}`} collapsed={collapsed}
+            onClick={() => onView(`folder:${f}`)} onContextMenu={(x, y) => onFolderMenu(f, x, y)} />
+        ))}
+        {!collapsed && !folders.length && (
+          <button onClick={onNewFolder} className="w-full rounded-lg px-3 py-1.5 text-left text-xs text-sidebar-foreground/50 hover:bg-sidebar-accent/60">+ New folder</button>
+        )}
       </nav>
       {!collapsed && <p className="mt-6 px-6 text-[11px] font-semibold uppercase tracking-widest text-sidebar-foreground/50">Channels</p>}
       <nav className="mt-2 space-y-1 px-3">
@@ -78,6 +110,11 @@ export function Sidebar({ user, view, onView, collapsed, channels, connectedCoun
         {!collapsed && (
           <button onClick={onProfile} title="Profile options" className="grid h-8 w-8 place-items-center rounded-lg text-sidebar-foreground/60 hover:bg-sidebar-accent/60">
             <MoreHorizontal className="h-4 w-4" />
+          </button>
+        )}
+        {onLock && (
+          <button onClick={onLock} title="Lock Sangam (Ctrl+Shift+L)" className="grid h-8 w-8 place-items-center rounded-lg text-sidebar-foreground/60 hover:bg-sidebar-accent/60">
+            <Lock className="h-4 w-4" />
           </button>
         )}
         <button onClick={onSettings} title="Settings" className="grid h-8 w-8 place-items-center rounded-lg text-sidebar-foreground/60 hover:bg-sidebar-accent/60">

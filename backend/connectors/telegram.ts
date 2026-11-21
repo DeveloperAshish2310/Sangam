@@ -13,7 +13,7 @@ import { emit } from "../events";
 import { reloadEnv } from "../env";
 import type { MessageButton, MessageExtra } from "../db/schema";
 import { hideMessages, updateMessage, upsertConversation, upsertMessage } from "../store";
-import type { BotCommand, Connector, ConnectorContext } from "./types";
+import type { BotCommand, Connector, ConnectorContext, GroupMember } from "./types";
 
 // The session string is a full login to your Telegram account — it's only ever stored encrypted.
 export type TelegramCredentials = { session: string };
@@ -24,6 +24,13 @@ type ConvoMeta = {
   keyboard?: string[][] | null;
   commands?: BotCommand[];
   commandsAt?: number;
+  phone?: string;
+  /** A broadcast channel (a feed): posts come from the channel, not from people. */
+  broadcast?: boolean;
+  /** You can't post here (a channel you don't admin): Sangam hides the composer. */
+  readOnly?: boolean;
+  /** Whether the chat was in Telegram's Archived folder at the last sync. */
+  tgArchived?: boolean;
 };
 
 const COMMANDS_TTL_MS = 24 * 3600_000;
@@ -35,6 +42,7 @@ async function patchMeta(convoId: number, patch: Partial<ConvoMeta>) {
   return meta;
 }
 
+// Chats whose recent history is re-read on every sync; older ones only get their latest message.
 const BACKFILL_DIALOGS = 40;
 const BACKFILL_MESSAGES = 20;
 
@@ -68,8 +76,11 @@ export function entityName(entity: Entity | undefined | null) {
   return [user.firstName, user.lastName].filter(Boolean).join(" ") || (user.username ? `@${user.username}` : user.phone ? `+${user.phone}` : "Unknown");
 }
 
-// Broadcast channels are feeds, not conversations; groups and private chats are what an inbox needs.
+// Broadcast channels are feeds: posts come from the channel itself, and only admins can post.
 const isBroadcast = (entity: Entity | undefined) => entity instanceof Api.Channel && !entity.megagroup;
+const canPost = (entity: Api.Channel) => !!(entity.creator || entity.adminRights?.postMessages);
+const channelMeta = (entity: Entity): Partial<ConvoMeta> =>
+  isBroadcast(entity) ? { broadcast: true, readOnly: !canPost(entity as Api.Channel) } : {};
 
 const mediaLabelFor = (mime: string, name: string) =>
   mime.startsWith("image/") ? "📷 Photo" : mime.startsWith("video/") ? "🎬 Video" : mime.startsWith("audio/") ? "🎵 Audio" : `📎 ${name}`;
@@ -98,6 +109,8 @@ async function senderName(m: Api.Message, chat: Entity | undefined) {
   if (m.out) return null;
   // In a private chat the sender is the chat itself; in groups, look the member up.
   if (chat instanceof Api.User) return entityName(chat);
+  // Channel posts are signed by the channel (or by an admin, when signatures are on).
+  if (isBroadcast(chat)) return m.postAuthor ?? entityName(chat);
   const sender = (await m.getSender().catch(() => undefined)) as Entity | undefined;
   return sender ? entityName(sender) : null;
 }
@@ -112,7 +125,7 @@ async function displayText(m: Api.Message, chat: Entity | undefined) {
   const text = messageText(m);
   const sender = await senderName(m, chat);
   // Group messages read better with the author in front, like the demo data does.
-  return { sender, text: !text || chat instanceof Api.User || m.out ? text : `${sender ?? "Someone"}: ${text}` };
+  return { sender, text: !text || chat instanceof Api.User || isBroadcast(chat) || m.out ? text : `${sender ?? "Someone"}: ${text}` };
 }
 
 /** A bot's inline buttons under its message. Callback data stays server-side for pressButton. */
@@ -156,12 +169,16 @@ function mediaAttachment(m: Api.Message) {
     const voice = doc.attributes.some((a) => a instanceof Api.DocumentAttributeAudio && a.voice);
     const ext = (doc.mimeType.split("/")[1] ?? "bin").replace(/[^a-z0-9]/gi, "").slice(0, 8) || "bin";
     const name = fileName ?? (voice ? `voice-${m.id}.ogg` : `file-${m.id}.${ext}`);
-    return { key: "media", name, mime: doc.mimeType || "application/octet-stream", size: Number(String(doc.size)), ref };
+    const video = doc.attributes.find((a): a is Api.DocumentAttributeVideo => a instanceof Api.DocumentAttributeVideo);
+    return {
+      key: "media", name, mime: doc.mimeType || "application/octet-stream", size: Number(String(doc.size)),
+      ref: { ...ref, ...(video && { duration: Math.round(video.duration), w: video.w, h: video.h }) },
+    };
   }
   return null;
 }
 
-async function storeMessage(convoId: number, m: Api.Message, chat: Entity | undefined, silent: boolean) {
+async function storeMessage(convoId: number, m: Api.Message, chat: Entity | undefined, silent: boolean, history = false) {
   const { sender, text } = await displayText(m, chat);
   if (!text) return;
   const attachment = mediaAttachment(m);
@@ -179,7 +196,8 @@ async function storeMessage(convoId: number, m: Api.Message, chat: Entity | unde
   });
   // Already stored: pick up any edit made while Sangam wasn't running.
   if (inserted === null) await updateMessage(convoId, String(m.id), { text, extra });
-  await trackKeyboard(convoId, m);
+  // Older history mustn't replace the keyboard a bot shows right now.
+  if (!history) await trackKeyboard(convoId, m);
 }
 
 const photoIdOf = (entity: Entity) => {
@@ -204,36 +222,55 @@ async function syncPhoto(client: TelegramClient, convoId: number, entity: Entity
 }
 
 async function backfill(ctx: ConnectorContext, client: TelegramClient) {
-  const dialogs = await client.getDialogs({ limit: BACKFILL_DIALOGS, archived: false });
-  for (const d of dialogs) {
-    const entity = d.entity as Entity | undefined;
-    if (!entity || isBroadcast(entity) || !d.id) continue;
-    const peerId = d.id.toString();
+  // Everything the Telegram app lists: chats, groups and channels, including the Archived folder
+  // (no folder filter = both).
+  const dialogs = (await client.getDialogs({})).filter((d) => d.entity && d.id);
+  for (const [i, d] of dialogs.entries()) {
+    const entity = d.entity as Entity;
+    const peerId = d.id!.toString();
     const muted = (d.dialog.notifySettings.muteUntil ?? 0) * 1000 > Date.now();
+    const existing = await findConversation(ctx.account.id, peerId);
     const convoId = await upsertConversation(ctx.account.id, { externalId: peerId, name: entityName(entity) });
-    const messages = await client.getMessages(entity, { limit: BACKFILL_MESSAGES });
-    for (const m of [...messages].reverse()) await storeMessage(convoId, m, entity, true);
-    // Telegram owns read state and mute settings.
-    await patchMeta(convoId, { muted });
-    await db.update(schema.conversations).set({ unread: d.unreadCount }).where(eq(schema.conversations.id, convoId));
+    // Telegram shares a phone only for your contacts; when it does, saved contacts can match it.
+    if (entity instanceof Api.User && entity.phone) await patchMeta(convoId, { phone: entity.phone });
+    if (!existing || i < BACKFILL_DIALOGS) {
+      // New chats and the most recent ones: their recent history.
+      const messages = await client.getMessages(entity, { limit: BACKFILL_MESSAGES });
+      for (const m of [...messages].reverse()) await storeMessage(convoId, m, entity, true);
+    } else if (d.message) {
+      // Older chats already synced: just their latest message, which came with the chat list.
+      await storeMessage(convoId, d.message, entity, true);
+    }
+    // Telegram owns read state, mute and archive. Archive is copied only when it changes in
+    // Telegram, so archiving/unarchiving a chat in Sangam isn't undone by the next sync.
+    const prevArchived = ((existing?.meta ?? {}) as ConvoMeta).tgArchived;
+    const archiveChanged = existing ? (prevArchived ?? false) !== d.archived : true;
+    await patchMeta(convoId, { muted, tgArchived: d.archived, ...channelMeta(entity) });
+    await db
+      .update(schema.conversations)
+      .set({ unread: d.unreadCount, ...(archiveChanged && { archived: d.archived }) })
+      .where(eq(schema.conversations.id, convoId));
     emit({ type: "conversation", id: convoId });
   }
+  const channels = dialogs.filter((d) => isBroadcast(d.entity as Entity)).length;
+  const groups = dialogs.filter((d) => !(d.entity instanceof Api.User)).length - channels;
+  ctx.log(`synced ${dialogs.length} chats (${groups} groups, ${channels} channels, ${dialogs.filter((d) => d.archived).length} archived)`);
   // Photos last, so chats appear first and pictures fill in after.
   for (const d of dialogs) {
-    const entity = d.entity as Entity | undefined;
-    if (!entity || isBroadcast(entity) || !d.id) continue;
-    const convo = await findConversation(ctx.account.id, d.id.toString());
-    if (convo) await syncPhoto(client, convo.id, entity).catch((err) => ctx.log("photo failed", err));
+    const convo = await findConversation(ctx.account.id, d.id!.toString());
+    if (convo) await syncPhoto(client, convo.id, d.entity as Entity).catch((err) => ctx.log("photo failed", err));
   }
 }
 
 async function onNewMessage(ctx: ConnectorContext, event: NewMessageEvent) {
   const m = event.message;
   const chat = (await m.getChat().catch(() => undefined)) as Entity | undefined;
-  if (!chat || isBroadcast(chat)) return;
+  if (!chat) return;
   const peerId = utils.getPeerId(m.peerId);
   const existing = await findConversation(ctx.account.id, peerId);
   const convoId = existing?.id ?? (await upsertConversation(ctx.account.id, { externalId: peerId, name: entityName(chat) }));
+  if (!existing && chat instanceof Api.User && chat.phone) await patchMeta(convoId, { phone: chat.phone });
+  if (!existing && isBroadcast(chat)) await patchMeta(convoId, channelMeta(chat));
   const muted = !!(existing?.meta as ConvoMeta | null)?.muted;
   await storeMessage(convoId, m, chat, muted);
   if (!existing) await syncPhoto(event.client!, convoId, chat).catch((err) => ctx.log("photo failed", err));
@@ -285,6 +322,48 @@ async function onReadElsewhere(ctx: ConnectorContext, update: Api.TypeUpdate) {
 // Peer ids are stored as marked strings ("-100…" for groups); GramJS treats plain strings as
 // usernames, so hand it the number to resolve from its entity cache.
 const peer = (externalId: string) => returnBigInt(externalId);
+
+// A message's media object, kept a while so streaming a video doesn't re-fetch the message for
+// every chunk. Telegram's file references expire, so a failed read retries with a fresh one.
+const mediaCache = new Map<string, { media: Api.TypeMessageMedia; at: number }>();
+const MEDIA_TTL_MS = 20 * 60_000;
+
+async function messageMedia(client: TelegramClient, peerId: string, msgId: number, fresh = false) {
+  const key = `${peerId}:${msgId}`;
+  const hit = mediaCache.get(key);
+  if (!fresh && hit && Date.now() - hit.at < MEDIA_TTL_MS) return hit.media;
+  const [msg] = await client.getMessages(peer(peerId), { ids: msgId });
+  if (!msg?.media) throw new Error("This file is no longer available in Telegram");
+  mediaCache.delete(key);
+  mediaCache.set(key, { media: msg.media, at: Date.now() });
+  if (mediaCache.size > 300) mediaCache.delete(mediaCache.keys().next().value!);
+  return msg.media;
+}
+
+const isExpiredReference = (error: unknown) => /FILE_REFERENCE_/.test(String((error as Error)?.message ?? error));
+
+/** The preview to show: ~800px for photos, the largest thumbnail for videos and files. */
+function previewSize(media: Api.TypeMessageMedia) {
+  const sizes =
+    media instanceof Api.MessageMediaPhoto && media.photo instanceof Api.Photo
+      ? media.photo.sizes
+      : media instanceof Api.MessageMediaDocument && media.document instanceof Api.Document
+        ? (media.document.thumbs ?? [])
+        : [];
+  const plain = sizes.filter((s): s is Api.PhotoSize => s instanceof Api.PhotoSize).sort((a, b) => a.w - b.w);
+  return plain.filter((s) => s.w <= 1000).pop() ?? plain[0];
+}
+
+const STREAM_CHUNK = 512 * 1024;
+// Big groups: list this many members (owner and admins always come first).
+const MEMBER_LIMIT = 500;
+
+const roleOf = (p: unknown): GroupMember["role"] =>
+  p instanceof Api.ChannelParticipantCreator || p instanceof Api.ChatParticipantCreator
+    ? "owner"
+    : p instanceof Api.ChannelParticipantAdmin || p instanceof Api.ChatParticipantAdmin
+      ? "admin"
+      : "member";
 
 const clients = new Map<number, TelegramClient>();
 // Per account: "reconnect now if down" (from the watchdog in start()).
@@ -355,7 +434,7 @@ export const telegramConnector: Connector = {
     }
   },
 
-  async compose(ctx, { to, text }) {
+  async compose(ctx, { to, text, html }) {
     const client = await clientFor(ctx);
     const target = to.trim();
     let entity: Entity | undefined;
@@ -368,11 +447,11 @@ export const telegramConnector: Connector = {
       entity = (await client.getEntity(target.replace(/^@/, "")).catch(() => undefined)) as Entity | undefined;
       if (!entity) throw new Error(`No Telegram user, bot or group called @${target.replace(/^@/, "")}.`);
     }
-    if (isBroadcast(entity)) throw new Error("That's a broadcast channel — only its admins can post there.");
+    if (isBroadcast(entity) && !canPost(entity as Api.Channel)) throw new Error("That's a broadcast channel — only its admins can post there.");
 
-    const sent = await client.sendMessage(entity, { message: text, parseMode: false });
+    const sent = await client.sendMessage(entity, html ? { message: html, parseMode: "html" } : { message: text, parseMode: false });
     const conversationId = await upsertConversation(ctx.account.id, { externalId: utils.getPeerId(entity), name: entityName(entity) });
-    await upsertMessage(conversationId, { externalId: String(sent.id), direction: "out", text, sentAt: sent.date * 1000, silent: true });
+    await upsertMessage(conversationId, { externalId: String(sent.id), direction: "out", text, html: html ?? null, sentAt: sent.date * 1000, silent: true });
     await syncPhoto(client, conversationId, entity).catch((err) => ctx.log("photo failed", err));
     return { conversationId };
   },
@@ -469,6 +548,12 @@ export const telegramConnector: Connector = {
       return inFlight;
     };
     reconnectors.set(ctx.account.id, ensure);
+    // Refresh: re-read recent chats (cheap: already-stored messages are skipped), or reconnect if offline.
+    ctx.onRefresh(async () => {
+      const c = client;
+      if (!c?.connected) return void (await ensure());
+      await ctx.job({ name: "sync", label: "Syncing Telegram", priority: "low", dedupe: true, timeoutMs: 30 * 60_000 }, () => backfill(ctx, c));
+    });
     void ensure();
 
     return async () => {
@@ -480,11 +565,12 @@ export const telegramConnector: Connector = {
     };
   },
 
-  async send(ctx, conversation, text, files) {
+  async send(ctx, conversation, text, files, opts) {
     const client = await clientFor(ctx);
+    // Formatted messages go as Telegram HTML; plain ones exactly as typed (no Markdown surprises).
+    const body = opts?.html ? { message: opts.html, parseMode: "html" as const } : { message: text, parseMode: false as const };
     if (!files.length) {
-      // parseMode false: send exactly what was typed, no Markdown surprises.
-      const sent = await client.sendMessage(peer(conversation.externalId), { message: text, parseMode: false });
+      const sent = await client.sendMessage(peer(conversation.externalId), body);
       return { externalId: String(sent.id), direction: "out", text, sentAt: sent.date * 1000, silent: true };
     }
     // One message per file, the typed text as the first one's caption — like the Telegram app.
@@ -493,7 +579,8 @@ export const telegramConnector: Connector = {
       const caption = i === 0 ? text : "";
       const sent = await client.sendFile(peer(conversation.externalId), {
         file: new CustomFile(f.name, f.data.length, "", f.data),
-        caption,
+        caption: i === 0 ? body.message : "",
+        parseMode: body.parseMode,
         // Photos and videos are shown inline; anything else is sent as a file with its name.
         forceDocument: !/^(image\/(jpeg|png|webp)|video\/mp4)$/.test(f.mime),
         workers: 2,
@@ -518,6 +605,78 @@ export const telegramConnector: Connector = {
     const data = await client.downloadMedia(msg, {});
     if (!Buffer.isBuffer(data) || !data.length) throw new Error("Telegram didn't return this file");
     return data;
+  },
+
+  async downloadThumbnail(ctx, conversation, attachment) {
+    const client = await clientFor(ctx);
+    const read = async (fresh: boolean) => {
+      const media = await messageMedia(client, conversation.externalId, Number(attachment.ref.msgId), fresh);
+      const size = previewSize(media);
+      if (!size) return null;
+      const data = await client.downloadMedia(media, { thumb: size });
+      return Buffer.isBuffer(data) && data.length ? data : null;
+    };
+    return read(false).catch((error) => (isExpiredReference(error) ? read(true) : Promise.reject(error)));
+  },
+
+  async streamAttachment(ctx, conversation, attachment, start, end) {
+    const client = await clientFor(ctx);
+    // Telegram serves files in aligned blocks: fetch the blocks covering start..end, then trim.
+    const aligned = start - (start % STREAM_CHUNK);
+    const blocks = Math.ceil((end + 1 - aligned) / STREAM_CHUNK);
+    const read = async (fresh: boolean) => {
+      const media = await messageMedia(client, conversation.externalId, Number(attachment.ref.msgId), fresh);
+      const parts: Buffer[] = [];
+      for await (const part of client.iterDownload({
+        file: media as unknown as Api.TypeInputFileLocation,
+        offset: returnBigInt(aligned),
+        limit: blocks,
+        requestSize: STREAM_CHUNK,
+      })) parts.push(Buffer.from(part));
+      return Buffer.concat(parts);
+    };
+    const data = await read(false).catch((error) => (isExpiredReference(error) ? read(true) : Promise.reject(error)));
+    return data.subarray(start - aligned, end + 1 - aligned);
+  },
+
+  async loadOlder(ctx, conversation, beforeExternalId, limit) {
+    const client = await clientFor(ctx);
+    const entity = (await client.getEntity(peer(conversation.externalId))) as Entity;
+    const messages = await client.getMessages(entity, { limit, offsetId: Number(beforeExternalId) || 0 });
+    for (const m of [...messages].reverse()) await storeMessage(conversation.id, m, entity, true, true);
+    return { added: messages.length, done: messages.length < limit };
+  },
+
+  async members(ctx, conversation) {
+    const client = await clientFor(ctx);
+    const entity = (await client.getEntity(peer(conversation.externalId))) as Entity;
+    if (entity instanceof Api.User) return null;
+    let count = entity instanceof Api.Chat ? entity.participantsCount : (entity as Api.Channel).participantsCount;
+    // The short channel info often leaves the count out; the full info always has it.
+    if (count == null && entity instanceof Api.Channel) {
+      const full = await client.invoke(new Api.channels.GetFullChannel({ channel: entity })).catch(() => null);
+      if (full?.fullChat instanceof Api.ChannelFull) count = full.fullChat.participantsCount ?? undefined;
+    }
+    if (isBroadcast(entity) && !canPost(entity as Api.Channel)) {
+      return { total: count ?? 0, members: [], note: "Telegram only shows a channel's subscribers to its admins." };
+    }
+    const me = await client.getMe();
+    try {
+      const users = await client.getParticipants(entity, { limit: MEMBER_LIMIT });
+      const members = users.map((u): GroupMember => ({
+        id: u.id.toString(),
+        name: entityName(u),
+        handle: u.username ? `@${u.username}` : u.phone ? `+${u.phone}` : null,
+        role: roleOf((u as Api.User & { participant?: unknown }).participant),
+        you: u.id.equals(me.id),
+      }));
+      return { total: Math.max(users.total ?? 0, count ?? 0, members.length), members };
+    } catch (error) {
+      if (/CHAT_ADMIN_REQUIRED|PARTICIPANTS_HIDDEN/.test(String((error as Error)?.message))) {
+        return { total: count ?? 0, members: [], note: "This group's admins have hidden the member list." };
+      }
+      throw error;
+    }
   },
 
   async markRead(ctx, conversation) {

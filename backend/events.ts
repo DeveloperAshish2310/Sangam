@@ -4,6 +4,8 @@ export type RelayEvent =
   | { type: "conversation"; id: number }
   | { type: "message"; conversationId: number; messageId: number; direction: "in" | "out" }
   | { type: "account"; id: number }
+  /** The job queues changed (something started, finished or is waiting on a rate limit). */
+  | { type: "jobs" }
   | { type: "reset" };
 
 const bus = new EventEmitter();

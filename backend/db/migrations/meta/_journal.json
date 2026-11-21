@@ -36,6 +36,27 @@
       "when": 1792427736255,
       "tag": "0004_attachments",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1792507938652,
+      "tag": "0005_contacts",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1793987707787,
+      "tag": "0006_conversation_folder",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "6",
+      "when": 1793988981347,
+      "tag": "0007_session_lock",
+      "breakpoints": true
     }
   ]
 }

@@ -89,3 +89,21 @@ describe("email text extraction", () => {
     expect(bestText("Use a < b and c > d in your formula", null)).toBe("Use a < b and c > d in your formula");
   });
 });
+
+describe("simple emails", () => {
+  it("are recognised, while designed emails keep their own look", async () => {
+    const { isSimpleEmail } = await import("@/components/relay/EmailFrame");
+    expect(isSimpleEmail('<html><body style="font-family:Arial;font-size:14px"><b>Hi</b><br><small>Sent from Sangam</small></body></html>')).toBe(true);
+    expect(isSimpleEmail("<p>Hi <a href='https://x.io'>link</a></p>")).toBe(true);
+    expect(isSimpleEmail(hostile)).toBe(false);
+    expect(isSimpleEmail('<p style="color:#333">Hi</p>')).toBe(false);
+    expect(isSimpleEmail("<table><tr><td>Newsletter</td></tr></table>")).toBe(false);
+  });
+
+  it("use the given colours and always have a doctype", () => {
+    const doc = buildDocument("<p>Hi</p>", false, { color: "rgb(240, 240, 240)", background: "rgb(30, 33, 40)", link: "#8ab4f8", dark: true });
+    expect(doc.startsWith("<!doctype html>")).toBe(true);
+    expect(doc).toContain("background: rgb(30, 33, 40) !important");
+    expect(doc).toContain('content="dark only"');
+  });
+});

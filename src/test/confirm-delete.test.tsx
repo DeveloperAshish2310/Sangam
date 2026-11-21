@@ -5,7 +5,8 @@ import type { Conversation, Message } from "@/lib/relay";
 
 const convo = (over: Partial<Conversation>): Conversation => ({
   id: 1, accountId: 1, channel: "telegram", externalId: "12345", name: "Priya", subject: null, unread: 0,
-  starred: false, archived: false, tags: [], lastMessageAt: 0, avatar: null, lastMessage: null, ...over,
+  starred: false, archived: false, tags: [], folder: null, lastMessageAt: 0, avatar: null, lastMessage: null,
+  contactId: null, contactName: null, handle: { phone: null, email: null }, ...over,
 });
 const message = (direction: "in" | "out"): Message => ({
   id: 9, conversationId: 1, direction, senderName: null, text: "hi", html: null, extra: null, attachments: [], sentAt: 0, status: "sent",

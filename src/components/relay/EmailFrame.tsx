@@ -18,7 +18,20 @@ function sanitizer() {
 
 export const hasRemoteImages = (html: string) => /<img[^>]+src\s*=\s*["']?https?:|url\(\s*["']?https?:/i.test(html);
 
-export function buildDocument(html: string, allowImages: boolean) {
+/**
+ * A plain email (text with basic formatting, no layout, colours or images of its own) can be shown
+ * in Sangam's colours, so it reads like a message instead of a white page. Designed emails keep theirs.
+ */
+export function isSimpleEmail(html: string) {
+  if (/<(style|table|img|font|center|link|svg|video)\b|\sbgcolor\s*=|\scolor\s*=|\sbackground\s*=/i.test(html)) return false;
+  // Inline styles may set fonts and spacing, but not colours or backgrounds.
+  return ![...html.matchAll(/\sstyle\s*=\s*("[^"]*"|'[^']*')/gi)].some((m) => /(^|[;\s"'])(color|background(-color|-image)?)\s*:/i.test(m[1]!));
+}
+
+/** Colours for a simple email, taken from the surrounding card. */
+export type FrameTheme = { color: string; background: string; link: string; dark: boolean };
+
+export function buildDocument(html: string, allowImages: boolean, theme?: FrameTheme) {
   const clean = sanitizer()
     .sanitize(html, { WHOLE_DOCUMENT: true, FORBID_TAGS: ["form", "input", "button", "textarea", "select"] })
     // Emails are shown in their light design, like Gmail does. Many ship half-finished dark-mode
@@ -30,17 +43,27 @@ export function buildDocument(html: string, allowImages: boolean) {
   const head = [
     `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'${remote}; img-src data: cid:${remote}; font-src data:${remote}">`,
     `<base target="_blank">`,
-    `<meta name="color-scheme" content="light only">`,
+    `<meta name="color-scheme" content="${theme?.dark ? "dark only" : "light only"}">`,
     `<style>
-      :root { color-scheme: light only; }
-      html, body { margin: 0; padding: 12px; background: #fff; color: #111; font: 14px/1.5 system-ui, sans-serif; overflow-wrap: anywhere; }
+      :root { color-scheme: ${theme?.dark ? "dark" : "light"} only; }
+      html { margin: 0; padding: 0; }
+      body { margin: 0; padding: 14px 16px; background: #fff; color: #111; font: 14px/1.55 system-ui, sans-serif; overflow-wrap: anywhere; }
+      ${theme ? `body { background: ${theme.background} !important; color: ${theme.color} !important; font-family: system-ui, sans-serif !important; }
+      a { color: ${theme.link}; }
+      p { margin: 0 0 0.6em; } p:last-child { margin-bottom: 0; }
+      small { opacity: 0.75; }
+      blockquote { margin: 0.4em 0; padding-left: 0.75em; border-left: 3px solid currentColor; opacity: 0.8; }
+      code, pre { font-family: ui-monospace, monospace; font-size: 0.9em; background: rgba(127,127,127,0.15); border-radius: 4px; }
+      code { padding: 0.1em 0.3em; } pre { padding: 0.6em 0.8em; overflow-x: auto; }` : ""}
       img { max-width: 100%; height: auto; }
       table { max-width: 100% !important; }
       /* Quoted history from earlier messages in the thread is already shown above. */
       .gmail_quote, blockquote[type="cite"], #divRplyFwdMsg, #divRplyFwdMsg ~ * { display: none !important; }
     </style>`,
   ].join("");
-  return clean.includes("<head>") ? clean.replace("<head>", `<head>${head}`) : `<html><head>${head}</head><body>${clean}</body></html>`;
+  // A doctype keeps the frame out of quirks mode, where the body always reports the frame's full height.
+  const full = clean.includes("<head>") ? clean.replace("<head>", `<head>${head}`) : `<html><head>${head}</head><body>${clean}</body></html>`;
+  return /^\s*<!doctype/i.test(full) ? full : `<!doctype html>${full}`;
 }
 
 /**
@@ -50,16 +73,36 @@ export function buildDocument(html: string, allowImages: boolean) {
  */
 export function EmailFrame({ html, allowImages }: { html: string; allowImages: boolean }) {
   const ref = useRef<HTMLIFrameElement>(null);
-  const [height, setHeight] = useState(160);
-  const doc = useMemo(() => (typeof window === "undefined" ? "" : buildDocument(html, allowImages)), [html, allowImages]);
+  const [height, setHeight] = useState(60);
+  const [theme, setTheme] = useState<FrameTheme | undefined>();
+  const simple = useMemo(() => isSimpleEmail(html), [html]);
+
+  // Simple emails take the card's colours (and follow light/dark mode when it changes).
+  useEffect(() => {
+    const frame = ref.current;
+    if (!simple || !frame?.parentElement) return setTheme(undefined);
+    const read = () => {
+      const card = getComputedStyle(frame.parentElement!);
+      const primary = getComputedStyle(document.documentElement).getPropertyValue("--primary").trim();
+      const dark = document.documentElement.classList.contains("dark");
+      setTheme({ color: card.color, background: card.backgroundColor, link: dark ? "#8ab4f8" : primary || "#1a73e8", dark });
+    };
+    read();
+    const observer = new MutationObserver(read);
+    observer.observe(document.documentElement, { attributes: true, attributeFilter: ["class", "style"] });
+    return () => observer.disconnect();
+  }, [simple]);
+
+  const doc = useMemo(() => (typeof window === "undefined" || (simple && !theme) ? "" : buildDocument(html, allowImages, theme)), [html, allowImages, simple, theme]);
 
   useEffect(() => {
     const frame = ref.current;
     if (!frame) return;
     let observer: ResizeObserver | undefined;
+    // The body's own height (not the page's, which is never smaller than the frame itself).
     const measure = () => {
-      const root = frame.contentDocument?.documentElement;
-      if (root) setHeight(Math.min(root.scrollHeight, 4000));
+      const body = frame.contentDocument?.body;
+      if (body) setHeight(Math.min(Math.ceil(body.getBoundingClientRect().height), 4000));
     };
     const onLoad = () => {
       measure();
@@ -84,8 +127,8 @@ export function EmailFrame({ html, allowImages }: { html: string; allowImages: b
       referrerPolicy="no-referrer"
       srcDoc={doc}
       // Inside an iframe, prefers-color-scheme follows this element's color-scheme, not the OS.
-      style={{ height, colorScheme: "light" }}
-      className="block w-full border-0 bg-white"
+      style={{ height, colorScheme: theme?.dark ? "dark" : "light" }}
+      className={`block w-full border-0 ${theme ? "" : "bg-white"}`}
     />
   );
 }

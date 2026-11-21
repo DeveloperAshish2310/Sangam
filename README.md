@@ -1,5 +1,7 @@
 # Sangam — Every conversation, one inbox
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+
 **Sangam** (संगम, *confluence* — where rivers meet) brings WhatsApp, Gmail, your work email and Telegram into a single, fast inbox. Read, reply, search and organise everything from one place, with messages arriving live.
 
 It runs entirely on **your own PC**: your messages and account logins are stored locally, encrypted, and never pass through anyone else's server. It's free — no paid services required.
@@ -72,9 +74,13 @@ You can connect **several accounts per channel** (e.g. three WhatsApp numbers, t
 **You need:** [Node.js](https://nodejs.org) **22 or newer** (`node --version` to check). Windows, macOS and Linux all work.
 
 ```bash
+git clone https://github.com/DeveloperAshish2310/Sangam.git
+cd Sangam
 npm install          # once
 npm run start:local  # starts the backend and the web app together
 ```
+
+`.env.example` lists every setting; Sangam creates `.env` on first start, and you add your Google/Telegram keys there when you connect those channels.
 
 Open **http://localhost:8888**. The first visit runs a short setup:
 
@@ -227,8 +233,8 @@ src/
 ├── hooks/use-relay.ts    # Data fetching, live updates, actions
 ├── lib/relay.ts          # Shared types and API client
 └── test/                 # Unit tests
-data/                     # Your local database and photos (git-ignored)
-PLAN.md                   # Full roadmap and design decisions
+data/                     # Your local database, photos and attachments (git-ignored)
+LICENSE                   # MIT
 ```
 
 ---
@@ -272,4 +278,33 @@ PLAN.md                   # Full roadmap and design decisions
 - **Microsoft Teams & Microsoft 365 mail** — Microsoft Graph connector.
 - **Email Cc / reply-all.**
 
-Details and decisions are in [`PLAN.md`](PLAN.md).
+Ideas and votes on what comes next are welcome in [Issues](https://github.com/DeveloperAshish2310/Sangam/issues).
+
+---
+
+## Contributing
+
+Contributions are welcome — bug reports, ideas and pull requests alike.
+
+1. Fork the repo and create a branch: `git checkout -b my-feature`
+2. Make your change; keep the style of the surrounding code.
+3. Check it: `npm run typecheck` and `npm test`
+4. Open a pull request describing what changed and why.
+
+**New channels** are a great place to start: each one is a single connector in `backend/connectors/` implementing the shared `Connector` interface (`types.ts`) — see `telegram.ts` or `mail.ts` for complete examples.
+
+Please **never include real messages, phone numbers, tokens or `.env` contents** in issues, screenshots or pull requests. Use **Settings → Load demo data** for screenshots.
+
+---
+
+## Disclaimer
+
+Sangam is an independent project and is **not affiliated with, endorsed by or sponsored by** WhatsApp, Meta, Telegram, Google or Microsoft. All product names and trademarks belong to their owners.
+
+The WhatsApp connector uses an **unofficial** protocol implementation (Baileys). Using unofficial clients may violate WhatsApp's Terms of Service and **can get a number banned**. You use it entirely at your own risk; use a spare number.
+
+---
+
+## License
+
+[MIT](LICENSE) © 2026 Ashish ([@DeveloperAshish2310](https://github.com/DeveloperAshish2310)) — free to use, modify and share, with the copyright notice kept.

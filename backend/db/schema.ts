@@ -1,7 +1,8 @@
 import { sql } from "drizzle-orm";
 import { index, integer, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
 
-export const CHANNEL_IDS = ["whatsapp", "telegram", "teams", "gmail", "mail"] as const;
+// "sangam" is the built-in notice chat (see notices.ts), not a service.
+export const CHANNEL_IDS = ["whatsapp", "telegram", "teams", "gmail", "mail", "sangam"] as const;
 export type ChannelId = (typeof CHANNEL_IDS)[number];
 
 const now = sql`(unixepoch() * 1000)`;
@@ -23,6 +24,9 @@ export const sessions = sqliteTable("sessions", {
   tokenHash: text("token_hash").primaryKey(),
   userId: integer("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
   expiresAt: integer("expires_at").notNull(),
+  // App lock: last time you used Sangam (mouse/keyboard), and whether this session must re-enter the password.
+  lastActiveAt: integer("last_active_at").notNull().default(0),
+  locked: integer("locked", { mode: "boolean" }).notNull().default(false),
 });
 
 // UI preferences and setup state, one JSON value per key.
@@ -63,6 +67,8 @@ export const conversations = sqliteTable(
     // Hidden locally; deleting in Sangam never deletes anything on the provider.
     hidden: integer("hidden", { mode: "boolean" }).notNull().default(false),
     tags: text("tags", { mode: "json" }).$type<string[]>().notNull().default(sql`'[]'`),
+    // Where the chat lives: null = Inbox, "spam" = Spam, anything else = a folder you made.
+    folder: text("folder"),
     lastMessageAt: integer("last_message_at").notNull().default(0),
     // Version tag of the profile photo saved under data/avatars (null = show initials).
     avatar: text("avatar"),
@@ -111,6 +117,24 @@ export const attachments = sqliteTable(
   },
   (t) => [uniqueIndex("attachments_message_key").on(t.messageId, t.key)],
 );
+
+/** People saved in Sangam's own address book (not pushed to WhatsApp/Telegram/Google). */
+export const contacts = sqliteTable("contacts", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  name: text("name").notNull(),
+  // Digits only, with country code — matches WhatsApp numbers and Telegram phones.
+  phone: text("phone"),
+  // Lower-case — matches email conversations.
+  email: text("email"),
+  notes: text("notes").notNull().default(""),
+  createdAt: integer("created_at").notNull().default(now),
+});
+
+/** Chats explicitly tied to a contact (for chats with no phone/email to match on). */
+export const contactLinks = sqliteTable("contact_links", {
+  conversationId: integer("conversation_id").primaryKey().references(() => conversations.id, { onDelete: "cascade" }),
+  contactId: integer("contact_id").notNull().references(() => contacts.id, { onDelete: "cascade" }),
+});
 
 export const auditLog = sqliteTable("audit_log", {
   id: integer("id").primaryKey({ autoIncrement: true }),

@@ -1,6 +1,7 @@
 import { gmail as gmailApi } from "@googleapis/gmail";
 import { CodeChallengeMethod } from "google-auth-library";
 import { Hono } from "hono";
+import { env } from "./env";
 import type { AuthEnv } from "./auth";
 import { encryptJson, newToken } from "./crypto";
 import type { ChannelId } from "./db/schema";
@@ -40,7 +41,8 @@ async function accountConnected(id: number, channel: ChannelId, label: string) {
   await startAccount(id);
 }
 
-const back = (params: Record<string, string>) => `/?${new URLSearchParams(params).toString()}`;
+// Back to the page, under Sangam's sub-path when it has one (from RELAY_PUBLIC_URL).
+const back = (params: Record<string, string>) => `${env.basePath}?${new URLSearchParams(params).toString()}`;
 
 /** Routes reachable without a session cookie (OAuth callbacks). */
 export const connectPublic = new Hono();

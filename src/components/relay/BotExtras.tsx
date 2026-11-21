@@ -1,16 +1,19 @@
 import { ExternalLink, Slash } from "lucide-react";
 import type { BotCommand, Message } from "@/lib/relay";
+import { parseWhatsApp } from "@/lib/formatting";
 
 // URLs, and /commands that start a word (optionally /command@SomeBot, as used in groups).
 const TOKEN = /(https?:\/\/[^\s<>"']*[^\s<>"'.,;:!?)\]])|((?:^|(?<=\s))\/[a-zA-Z0-9_]{1,32}(?:@[a-zA-Z0-9_]{3,32})?(?![\w/]))/g;
 
 /** Message text with clickable links, and (in bot chats) tappable /commands. */
-export function RichText({ text, onCommand }: { text: string; onCommand?: ((command: string) => void) | undefined }) {
+export function RichText({ text, onCommand, whatsapp }: { text: string; onCommand?: ((command: string) => void) | undefined; whatsapp?: boolean }) {
   const parts: React.ReactNode[] = [];
+  // WhatsApp text carries its own *bold* _italic_ ~strike~ `code` markers; show them as formatting.
+  const plain = (s: string, key: number) => (whatsapp ? <WhatsAppText key={`w${key}`} text={s} /> : s);
   let last = 0;
   for (const match of text.matchAll(TOKEN)) {
     const index = match.index ?? 0;
-    if (index > last) parts.push(text.slice(last, index));
+    if (index > last) parts.push(plain(text.slice(last, index), last));
     const [token, url, command] = match;
     if (url) {
       parts.push(
@@ -29,8 +32,20 @@ export function RichText({ text, onCommand }: { text: string; onCommand?: ((comm
     }
     last = index + token.length;
   }
-  if (last < text.length) parts.push(text.slice(last));
+  if (last < text.length) parts.push(plain(text.slice(last), last));
   return <p className="whitespace-pre-wrap break-words leading-relaxed">{parts}</p>;
+}
+
+function WhatsAppText({ text }: { text: string }) {
+  return (
+    <>
+      {parseWhatsApp(text).map((s, i) => {
+        if (s.pre) return <code key={i} className="my-1 block overflow-x-auto rounded-md bg-current/10 px-2 py-1 font-mono text-[0.85em]">{s.text}</code>;
+        const style = [s.b && "font-semibold", s.i && "italic", s.s && "line-through", s.code && "rounded bg-current/10 px-1 font-mono text-[0.85em]"].filter(Boolean).join(" ");
+        return style ? <span key={i} className={style}>{s.text}</span> : s.text;
+      })}
+    </>
+  );
 }
 
 /** A bot's inline buttons under its message, laid out in the bot's rows. */
